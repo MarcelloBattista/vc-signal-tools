@@ -15,8 +15,8 @@ module VCTools
       SYNTH_MODEL = "deepseek-r1:8b" # higher quality synthesis + signal extraction
 
       CROSSLINK_CONTEXT = <<~CTX
-        You are an AI assistant helping a first-year analyst at Crosslink Capital, an early-stage venture firm.
-        Crosslink invests $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
+        You are an AI assistant helping a first-year analyst at an early-stage venture firm.
+        You invest $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
         They do NOT invest in biotech or crypto. Focus on insights relevant to early-stage investing and emerging technology.
       CTX
 
