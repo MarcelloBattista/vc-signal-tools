@@ -14,6 +14,7 @@ gem "rufus-scheduler", "~> 3.9"
 
 # Notifications
 gem "mail", "~> 2.8"
+gem "resend", "~> 0.17"
 
 # HTTP client (for Slack webhooks)
 gem "faraday", "~> 2.12"

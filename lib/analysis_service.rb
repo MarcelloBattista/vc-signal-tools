@@ -164,14 +164,13 @@ module VCTools
              - Include the speakers' actual arguments and reasoning, not just topics
              - Note any disagreements or contrarian takes
              - Connect relevant points to early-stage investing where natural
-          3. End with a "Bottom Line for Crosslink" paragraph with concrete, actionable observations.
-
           IMPORTANT: Do NOT write generic statements. Every sentence should contain a specific fact, name, number, or argument from the episode. If you cannot be specific, leave it out.
+          STRICTLY FORBIDDEN: Do NOT include any concluding section such as "Bottom Line", "Bottom Line for Crosslink", "Conclusion", "Summary", or "Key Takeaways" at the end of summary_md. End the writeup after the last talking point. Any conclusion paragraph will be rejected.
 
           Return ONLY valid JSON with this exact structure (no extra text before or after):
           {
             "summary_md": "The full 500-1000 word markdown writeup described above",
-            "key_takeaways": ["specific takeaway with names/numbers 1", "specific takeaway 2", "specific takeaway 3"],
+            "key_takeaways": ["specific takeaway 1 with names/numbers", "specific takeaway 2", "specific takeaway 3", "specific takeaway 4", "specific takeaway 5"],
             "investment_signals": [
               {"signal": "specific signal", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "specific reason"}
             ],

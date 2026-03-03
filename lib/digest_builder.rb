@@ -94,9 +94,23 @@ module VCTools
           lines << "## #{i + 1}. #{ep[:podcast_name]}: #{ep[:title]}"
           lines << ""
 
-          # The summary_md field now contains the full 500-1000 word analysis
-          lines << ep[:summary] if ep[:summary]
+          # The summary_md field contains the full 500-1000 word analysis
+          # Strip any "Bottom Line" conclusion the LLM may have added
+          summary = ep[:summary] || ""
+          summary = summary.sub(/\n*###?\s*Bottom Line.*\z/mi, "").rstrip
+          lines << summary unless summary.empty?
           lines << ""
+
+          if !ep[:key_takeaways].empty? || !ep[:investment_signals].empty?
+            lines << "#### Key Takeaways and Investment Signals"
+            ep[:key_takeaways].first(5).each { |t| lines << "- #{t}" }
+            ep[:investment_signals].each do |sig|
+              sig = sig.is_a?(Hash) ? sig : JSON.parse(sig) rescue next
+              lines << "- **[#{sig['sector']}]** #{sig['signal']} — #{sig['why_it_matters']}"
+            end
+            lines << ""
+          end
+
           lines << "---"
           lines << ""
         end
@@ -128,33 +142,24 @@ module VCTools
       end
 
       def send_email(date, markdown)
-        require "mail"
+        require "resend"
         require "dotenv/load"
 
-        return puts "[Digest] No SMTP config, skipping email" unless ENV["SMTP_USERNAME"]
+        return puts "[Digest] No RESEND_API_KEY, skipping email" unless ENV["RESEND_API_KEY"]
 
-        Mail.defaults do
-          delivery_method :smtp, {
-            address:              ENV["SMTP_ADDRESS"] || "smtp.gmail.com",
-            port:                 ENV.fetch("SMTP_PORT", 587).to_i,
-            user_name:            ENV["SMTP_USERNAME"],
-            password:             ENV["SMTP_PASSWORD"],
-            authentication:       :plain,
-            enable_starttls_auto: true,
-            open_timeout:         15,
-            read_timeout:         15
-          }
-        end
+        Resend.api_key = ENV["RESEND_API_KEY"]
 
-        to_addr = ENV.fetch("ALERT_TO_EMAIL", ENV["SMTP_USERNAME"])
-        body    = markdown
+        recipients = ENV.fetch("ALERT_TO_EMAIL", "marcellobattista@outlook.com")
+                       .split(",").map(&:strip)
 
-        Mail.deliver do
-          from    ENV.fetch("SMTP_FROM", ENV["SMTP_USERNAME"])
-          to      to_addr
-          subject "VC Podcast Digest — #{date}"
-          body    body
-        end
+        html = markdown_to_html(markdown)
+
+        Resend::Emails.send({
+          from:    "VC Signal Tools <onboarding@resend.dev>",
+          to:      recipients,
+          subject: "VC/Tech Podcast Digest - #{date}",
+          html:    html
+        })
 
         @digests.where(digest_date: date).update(
           sent_at:         Time.now.utc,
@@ -164,6 +169,32 @@ module VCTools
       rescue => e
         puts "[Digest] Email error: #{e.message}"
         @digests.where(digest_date: date).update(delivery_status: "failed")
+      end
+
+      def markdown_to_html(md)
+        lines = md.lines.map(&:rstrip)
+        html_lines = lines.map do |line|
+          case line
+          when /^#### (.+)/  then "<h4>#{$1}</h4>"
+          when /^### (.+)/   then "<h3>#{$1}</h3>"
+          when /^## (.+)/    then "<h2>#{$1}</h2>"
+          when /^# (.+)/     then "<h1>#{$1}</h1>"
+          when /^---$/       then "<hr>"
+          when /^- (.+)/     then "<li>#{$1}</li>"
+          when /^\s*$/       then ""
+          else                    "<p>#{line}</p>"
+          end
+        end
+
+        # Wrap consecutive <li> items in <ul>
+        result = html_lines.join("\n")
+          .gsub(/(<li>.*?<\/li>\n?)+/) { |m| "<ul>\n#{m}</ul>\n" }
+
+        # Inline formatting: **bold** and _italic_
+        result.gsub!(/\*\*(.+?)\*\*/, '<strong>\1</strong>')
+        result.gsub!(/(?<!\w)_(.+?)_(?!\w)/, '<em>\1</em>')
+
+        "<div style=\"font-family: -apple-system, Arial, sans-serif; max-width: 700px; margin: 0 auto; line-height: 1.6;\">#{result}</div>"
       end
 
     end
