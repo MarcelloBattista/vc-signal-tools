@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Long-running scheduler for the VC podcast pipeline.
+# Runs two jobs:
+#   1. Ingest new episodes every 6 hours
+#   2. Full pipeline (transcribe + analyze + digest) at 6:00 AM daily
+#      so the digest email arrives by ~7:00 AM
+#
+# Start with:  ruby bin/scheduler
+# Stop with:   Ctrl-C
+# For production, run via launchd, systemd, or a process manager.
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "dotenv/load"
+require "rufus-scheduler"
+require "podcast_ingestor"
+require "transcript_service"
+require "analysis_service"
+require "digest_builder"
+
+scheduler = Rufus::Scheduler.new
+
+limit = ENV["LIMIT"]&.to_i || 5  # default: process up to 5 episodes per run
+
+puts "[Scheduler] Started at #{Time.now.strftime('%Y-%m-%d %H:%M')}"
+puts "[Scheduler] Ingest: every 6 hours | Pipeline + Digest: daily at 6:00 AM"
+puts "[Scheduler] Episode limit per run: #{limit}"
+puts "[Scheduler] Ctrl-C to stop"
+puts
+
+# Ingest new RSS episodes every 6 hours
+scheduler.every "6h", first_in: "10s" do
+  puts "\n[Scheduler] Running RSS ingest — #{Time.now.strftime('%H:%M')}"
+  VCTools::Podcast::Ingestor.new.run
+rescue => e
+  puts "[Scheduler] Ingest error: #{e.message}"
+end
+
+# Full pipeline daily at 6:00 AM local time
+scheduler.cron "0 6 * * *" do
+  puts "\n[Scheduler] Running full pipeline — #{Time.now.strftime('%Y-%m-%d %H:%M')}"
+
+  puts "[Scheduler] Transcribing..."
+  VCTools::Podcast::TranscriptService.new.run(limit: limit)
+
+  puts "[Scheduler] Analyzing..."
+  VCTools::Podcast::AnalysisService.new.run(limit: limit)
+
+  puts "[Scheduler] Building digest..."
+  VCTools::Podcast::DigestBuilder.new.run
+
+  puts "[Scheduler] Pipeline complete"
+rescue => e
+  puts "[Scheduler] Pipeline error: #{e.message}"
+end
+
+scheduler.join

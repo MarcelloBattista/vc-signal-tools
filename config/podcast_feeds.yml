@@ -1,0 +1,84 @@
+# Podcast RSS feeds for the VC Intelligence Pipeline
+# Verify each URL is still active before first run.
+
+podcasts:
+  - name: "The Twenty Minute VC"
+    url: "https://thetwentyminutevc.libsyn.com/rss"
+    tags:
+      - vc
+      - investing
+      - founders
+      - early-stage
+    max_episodes_per_run: 5
+
+  - name: "Latent Space"
+    url: "https://api.substack.com/feed/podcast/1084089.rss"
+    tags:
+      - ai
+      - engineering
+      - dev-tools
+      - infra
+    max_episodes_per_run: 5
+
+  - name: "The Full Ratchet"
+    url: "http://fullratchet.libsyn.com/rss"
+    tags:
+      - vc
+      - early-stage
+      - investing
+      - founders
+    max_episodes_per_run: 5
+
+  - name: "Uncapped with Jack Altman"
+    url: "https://feeds.megaphone.fm/PDP4191604852"
+    tags:
+      - vc
+      - founders
+      - investing
+      - tech
+    max_episodes_per_run: 5
+
+  - name: "Grit"
+    url: "https://feeds.transistor.fm/go-to-market-grit"
+    tags:
+      - go-to-market
+      - founders
+      - scaling
+      - vc
+    max_episodes_per_run: 5
+
+  - name: "a16z Podcast"
+    url: "https://feeds.simplecast.com/JGE3yC0V"
+    tags:
+      - vc
+      - tech
+      - ai
+      - investing
+    max_episodes_per_run: 5
+
+  - name: "All-In Podcast"
+    url: "https://rss.libsyn.com/shows/254861/destinations/1928300.xml"
+    tags:
+      - tech
+      - markets
+      - investing
+      - macro
+    max_episodes_per_run: 5
+
+  - name: "Acquired"
+    url: "https://feeds.transistor.fm/acquired"
+    tags:
+      - tech
+      - business
+      - diligence
+      - history
+    max_episodes_per_run: 5
+
+  - name: "This Week in Startups"
+    url: "https://anchor.fm/s/7c624c84/podcast/rss"
+    tags:
+      - startups
+      - founders
+      - investing
+      - early-stage
+    max_episodes_per_run: 5

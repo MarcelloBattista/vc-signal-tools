@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/marcellobattista/.rbenv/shims/ruby -e \":*)",
+      "Bash(ollama list)"
+    ]
+  }
+}

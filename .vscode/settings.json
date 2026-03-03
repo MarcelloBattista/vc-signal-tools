@@ -1,0 +1,12 @@
+{
+  "editor.semanticHighlighting.enabled": true,
+  "rubyLsp.rubyVersionManager": "rbenv",
+  "rubyLsp.enabledFeatures": [
+    "diagnostics",
+    "completion",
+    "hover",
+    "documentSymbols",
+    "semanticHighlighting",
+    "formatting"
+  ]
+}

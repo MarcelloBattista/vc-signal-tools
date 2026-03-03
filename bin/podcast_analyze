@@ -1,0 +1,9 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "dotenv/load"
+require "analysis_service"
+
+VCTools::Podcast::AnalysisService.new.run(limit: ENV["LIMIT"]&.to_i)

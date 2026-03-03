@@ -1,0 +1,10 @@
+#!/usr/bin/env ruby
+# Run once:          bundle exec ruby bin/run_bio_tracker
+# Run on a schedule: use cron or rufus-scheduler (see below)
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "bio_tracker"
+
+tracker = VCTools::BioTracker.new
+tracker.run

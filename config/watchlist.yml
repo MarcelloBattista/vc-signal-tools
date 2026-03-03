@@ -1,0 +1,21 @@
+# Twitter/X usernames to monitor for bio changes
+# Add up to ~500 handles — the tool batches them 100 at a time
+# Format: just the username without @
+
+usernames:
+  # Tier 1 VCs
+  - garrytan
+  - paulg
+  - pmarca
+  - rabois
+  - HarryStebbings
+  - Jason
+  - fredwilson
+
+  # Seed/Pre-seed VCs
+  - jeff
+  - hunterwalk
+
+  # Add founders, researchers, and operators you want to track below
+  # - somefounder
+  # - airesearcher

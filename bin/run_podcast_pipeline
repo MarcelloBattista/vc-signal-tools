@@ -1,0 +1,46 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Full podcast pipeline: ingest → transcribe → analyze → digest email
+# Usage:
+#   ruby bin/run_podcast_pipeline                  # process all new episodes
+#   LIMIT=3 ruby bin/run_podcast_pipeline          # limit transcription + analysis to 3 episodes
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "dotenv/load"
+require "podcast_ingestor"
+require "transcript_service"
+require "analysis_service"
+require "digest_builder"
+
+limit = ENV["LIMIT"]&.to_i
+
+puts "=" * 60
+puts "VC Podcast Pipeline — #{Time.now.strftime('%Y-%m-%d %H:%M')}"
+puts "=" * 60
+puts
+
+# Step 1: Ingest new episodes from RSS feeds
+puts "--- Step 1: Ingest RSS Feeds ---"
+VCTools::Podcast::Ingestor.new.run
+puts
+
+# Step 2: Transcribe new episodes
+puts "--- Step 2: Transcribe Episodes ---"
+VCTools::Podcast::TranscriptService.new.run(limit: limit)
+puts
+
+# Step 3: Analyze transcribed episodes
+puts "--- Step 3: Analyze Episodes ---"
+VCTools::Podcast::AnalysisService.new.run(limit: limit)
+puts
+
+# Step 4: Build and send daily digest
+puts "--- Step 4: Build & Send Digest ---"
+VCTools::Podcast::DigestBuilder.new.run
+puts
+
+puts "=" * 60
+puts "Pipeline complete"
+puts "=" * 60
