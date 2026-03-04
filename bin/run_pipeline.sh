@@ -6,5 +6,9 @@ export RBENV_ROOT="/Users/marcellobattista/.rbenv"
 eval "$("$RBENV_ROOT/bin/rbenv" init - bash 2>/dev/null)"
 
 cd "/Users/marcellobattista/vc-signal-tools" || exit 1
+
+# Keep Mac awake for the duration of the pipeline
+caffeinate -s -w $$ &
+
 LIMIT=3 /Users/marcellobattista/.rbenv/versions/3.3.6/bin/ruby bin/run_podcast_pipeline \
   >> /Users/marcellobattista/Library/Logs/vc-signal-tools/pipeline.log 2>&1
