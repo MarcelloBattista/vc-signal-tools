@@ -114,8 +114,12 @@ module VCTools
           - Concrete strategies, tactics, or frameworks described (not vague references)
           - Any disagreements, debates, or contrarian takes
 
-          Do NOT write generic statements like "AI is important" or "startups need product-market fit."
-          Instead write things like "Vlad Tenev said Robinhood's prediction markets hit $1B in volume within 3 months of launch."
+          CRITICAL RULES — DO NOT HALLUCINATE:
+          - ONLY include names, companies, titles, and affiliations that are EXPLICITLY stated in the excerpt above.
+          - If you are unsure of a speaker's name, write "a speaker" or "the host" — do NOT guess.
+          - Do NOT invent affiliations (e.g., do NOT say someone is "from Crosslink" or any firm unless the text explicitly says so).
+          - Do NOT add people, companies, or facts from your general knowledge — ONLY use what appears in the excerpt.
+          - If a detail is ambiguous or unclear in the text, leave it out entirely.
 
           Excerpt:
           #{text}
@@ -137,6 +141,8 @@ module VCTools
           - Keep direct quotes or close paraphrases of speaker opinions
           - Maintain specific examples and anecdotes — do not abstract them away
           - Remove only pure duplicates
+
+          CRITICAL: Do NOT add any names, companies, affiliations, or facts that are not in the notes above. If a name or detail appears only once and seems out of place, it may be an error — flag it with [unverified] or drop it. Do NOT invent connections between people and organizations.
 
           Notes to consolidate:
           #{notes_text}
@@ -166,6 +172,12 @@ module VCTools
              - Connect relevant points to early-stage investing where natural
           IMPORTANT: Do NOT write generic statements. Every sentence should contain a specific fact, name, number, or argument from the episode. If you cannot be specific, leave it out.
           STRICTLY FORBIDDEN: Do NOT include any concluding section such as "Bottom Line", "Bottom Line for Crosslink", "Conclusion", "Summary", or "Key Takeaways" at the end of summary_md. End the writeup after the last talking point. Any conclusion paragraph will be rejected.
+
+          CRITICAL — DO NOT HALLUCINATE:
+          - ONLY reference names, companies, titles, and affiliations that appear in the notes provided below.
+          - Do NOT add people or organizations from your general knowledge. For example, do NOT attribute people to "Crosslink Capital" or any firm unless the notes explicitly say so.
+          - If unsure who said something, write "a speaker" or "the host" — never guess a name.
+          - It is better to leave out a detail than to fabricate one. Accuracy is more important than completeness.
 
           Return ONLY valid JSON with this exact structure (no extra text before or after):
           {
