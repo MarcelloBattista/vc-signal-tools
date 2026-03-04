@@ -14,7 +14,7 @@ module VCTools
       CHUNK_MODEL = "llama3.2"      # fast per-chunk summarization
       SYNTH_MODEL = "deepseek-r1:8b" # higher quality synthesis + signal extraction
 
-      CROSSLINK_CONTEXT = <<~CTX
+      CROSSLINK_CONTEXT = <<~CTX    
         You are an AI assistant helping a first-year analyst at an early-stage venture firm.
         You invest $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
         They do NOT invest in biotech or crypto. Focus on insights relevant to early-stage investing and emerging technology.
@@ -179,15 +179,16 @@ module VCTools
           - If unsure who said something, write "a speaker" or "the host" — never guess a name.
           - It is better to leave out a detail than to fabricate one. Accuracy is more important than completeness.
 
-          Return ONLY valid JSON with this exact structure (no extra text before or after):
+          Return ONLY valid JSON with this exact structure (no extra text before or after).
+          IMPORTANT: The "summary_md" value must be YOUR ACTUAL WRITEUP — do NOT copy the placeholder text. Write the real 500-1000 word analysis here.
           {
-            "summary_md": "The full 500-1000 word markdown writeup described above",
-            "key_takeaways": ["specific takeaway 1 with names/numbers", "specific takeaway 2", "specific takeaway 3", "specific takeaway 4", "specific takeaway 5"],
+            "summary_md": "WRITE YOUR ACTUAL 500-1000 WORD MARKDOWN ANALYSIS HERE. DO NOT COPY THIS PLACEHOLDER.",
+            "key_takeaways": ["takeaway 1", "takeaway 2", "takeaway 3", "takeaway 4", "takeaway 5"],
             "investment_signals": [
-              {"signal": "specific signal", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "specific reason"}
+              {"signal": "description", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "reason"}
             ],
-            "risks": ["specific risk 1", "specific risk 2"],
-            "action_items": ["specific follow-up action for a VC analyst"]
+            "risks": ["risk 1", "risk 2"],
+            "action_items": ["action 1"]
           }
 
           Detailed notes from the episode:
@@ -203,7 +204,24 @@ module VCTools
         json_match = raw.match(/\{.*\}/m)
         return nil unless json_match
 
-        JSON.parse(json_match[0])
+        result = JSON.parse(json_match[0])
+
+        # Reject if the model copied the placeholder instead of writing a real summary
+        summary = result["summary_md"].to_s
+        if summary.length < 100 || summary.include?("WRITE YOUR ACTUAL") || summary.include?("500-1000 word markdown writeup")
+          puts "[Analysis] Model returned placeholder instead of real summary — retrying"
+          raw = ollama_generate(SYNTH_MODEL, prompt)
+          return nil unless raw
+          json_match = raw.match(/\{.*\}/m)
+          return nil unless json_match
+          result = JSON.parse(json_match[0])
+          if result["summary_md"].to_s.length < 100
+            puts "[Analysis] Retry also returned placeholder — skipping"
+            return nil
+          end
+        end
+
+        result
 
       rescue JSON::ParserError => e
         puts "[Analysis] JSON parse error: #{e.message}"
