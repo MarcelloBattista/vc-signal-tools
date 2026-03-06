@@ -29,8 +29,19 @@ module VCTools
           return nil
         end
 
+        # Check if we'd be sending the same episodes as the last digest
+        new_titles = analyzed.map { |ep| ep[:title] }.sort
+        last_sent  = @digests.where(delivery_status: "sent").order(:digest_date).last
+        if last_sent && last_sent[:episode_titles]
+          old_titles = JSON.parse(last_sent[:episode_titles]) rescue []
+          if new_titles == old_titles.sort
+            puts "[Digest] Same episodes as last sent digest — skipping"
+            return nil
+          end
+        end
+
         markdown = build_markdown(date, analyzed)
-        store_digest(date, markdown, analyzed.length)
+        store_digest(date, markdown, analyzed.length, new_titles)
         send_email(date, markdown)
 
         puts "[Digest] Done — #{analyzed.length} episodes, email sent"
@@ -71,10 +82,10 @@ module VCTools
             published_at:       episode[:published_at],
             analyzed_at:        episode[:updated_at],
             summary:            analysis[:summary_md],
-            key_takeaways:      JSON.parse(analysis[:key_takeaways_json] || "[]"),
-            investment_signals: JSON.parse(analysis[:investment_signals_json] || "[]"),
-            risks:              JSON.parse(analysis[:risks_json] || "[]"),
-            action_items:       JSON.parse(analysis[:action_items_json] || "[]")
+            key_takeaways:      JSON.parse(analysis[:key_takeaways_json] || "[]") || [],
+            investment_signals: JSON.parse(analysis[:investment_signals_json] || "[]") || [],
+            risks:              JSON.parse(analysis[:risks_json] || "[]") || [],
+            action_items:       JSON.parse(analysis[:action_items_json] || "[]") || []
           }
         end.compact.then { |eps| select_diverse(eps) }
       end
@@ -105,16 +116,23 @@ module VCTools
           lines << "## #{i + 1}. #{ep[:podcast_name]}: #{ep[:title]}"
           lines << ""
 
-          # The summary_md field contains the full 500-1000 word analysis
+          # The summary_md contains Overview + Major Talking Points from the LLM
           # Strip any "Bottom Line" conclusion the LLM may have added
           summary = ep[:summary] || ""
           summary = summary.sub(/\n*###?\s*Bottom Line.*\z/mi, "").rstrip
           lines << summary unless summary.empty?
           lines << ""
 
-          if !ep[:key_takeaways].empty? || !ep[:investment_signals].empty?
-            lines << "#### Key Takeaways and Investment Signals"
+          # Key Takeaways section
+          unless ep[:key_takeaways].empty?
+            lines << "### Key Takeaways"
             ep[:key_takeaways].first(5).each { |t| lines << "- #{t}" }
+            lines << ""
+          end
+
+          # Investment Signals section
+          unless ep[:investment_signals].empty?
+            lines << "### Investment Signals"
             ep[:investment_signals].each do |sig|
               sig = sig.is_a?(Hash) ? sig : JSON.parse(sig) rescue next
               lines << "- **[#{sig['sector']}]** #{sig['signal']} — #{sig['why_it_matters']}"
@@ -138,12 +156,14 @@ module VCTools
         lines.join("\n")
       end
 
-      def store_digest(date, markdown, episode_count)
+      def store_digest(date, markdown, episode_count, titles = [])
+        titles_json = titles.to_json
         existing = @digests.where(digest_date: date).first
         if existing
           @digests.where(id: existing[:id]).update(
             content_md:      markdown,
             episode_count:   episode_count,
+            episode_titles:  titles_json,
             delivery_status: "pending"
           )
         else
@@ -151,6 +171,7 @@ module VCTools
             digest_date:     date,
             content_md:      markdown,
             episode_count:   episode_count,
+            episode_titles:  titles_json,
             delivery_status: "pending"
           )
         end

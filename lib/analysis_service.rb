@@ -10,13 +10,12 @@ module VCTools
   module Podcast
     class AnalysisService
 
-      OLLAMA_URL  = "http://localhost:11434"
-      CHUNK_MODEL = "llama3.2"      # fast per-chunk summarization
-      SYNTH_MODEL = "deepseek-r1:8b" # higher quality synthesis + signal extraction
+      GEMINI_URL   = "https://generativelanguage.googleapis.com"
+      GEMINI_MODEL = "gemini-2.5-flash"
 
-      CROSSLINK_CONTEXT = <<~CTX    
+      CROSSLINK_CONTEXT = <<~CTX
         You are an AI assistant helping a first-year analyst at an early-stage venture firm.
-        You invest $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
+        The firm invests $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
         They do NOT invest in biotech or crypto. Focus on insights relevant to early-stage investing and emerging technology.
       CTX
 
@@ -26,15 +25,24 @@ module VCTools
         @transcripts = @db[:transcripts]
         @chunks      = @db[:transcript_chunks]
         @analyses    = @db[:episode_analyses]
-        @client      = Faraday.new(url: OLLAMA_URL) do |f|
+
+        require "dotenv/load"
+        @api_key = ENV["GEMINI_API_KEY"]
+
+        @client = Faraday.new(url: GEMINI_URL) do |f|
           f.request  :json
           f.response :json
-          f.options.timeout      = 300  # 5 min — synthesis can be slow
+          f.options.timeout      = 120
           f.options.open_timeout = 10
         end
       end
 
       def run(limit: nil)
+        unless @api_key
+          puts "[Analysis] No GEMINI_API_KEY set — skipping"
+          return
+        end
+
         pending = diverse_episodes("transcribed", limit)
         puts "[Analysis] #{pending.length} episodes to analyze"
 
@@ -56,7 +64,7 @@ module VCTools
           result.concat(eps.first(per_pod))
         end
 
-        result.sort_by { |ep| ep[:published_at] }.first(limit)
+        result.sort_by { |ep| ep[:published_at] }.reverse.first(limit)
       end
 
       def analyze_episode(episode)
@@ -68,28 +76,19 @@ module VCTools
           return update_status(episode[:id], "failed")
         end
 
+        # Get the full transcript text from chunks
         chunks = @chunks.where(transcript_id: transcript[:id]).order(:chunk_index).all
         if chunks.empty?
           puts "[Analysis] No chunks for transcript #{transcript[:id]}"
           return update_status(episode[:id], "failed")
         end
 
-        # Map: summarize each chunk individually
-        chunk_summaries = chunks.map.with_index do |chunk, i|
-          puts "[Analysis]   Chunk #{i + 1}/#{chunks.length}..."
-          summarize_chunk(chunk[:text], episode[:title])
-        end
+        full_text = chunks.map { |c| c[:text] }.join("\n\n")
+        puts "[Analysis]   Transcript: #{chunks.length} chunks, #{full_text.length} chars"
 
-        # Mid-reduce: collapse chunk summaries into 4 groups, preserving specifics
-        group_size    = (chunk_summaries.length / 4.0).ceil
-        group_summaries = chunk_summaries.each_slice(group_size).map.with_index do |group, i|
-          puts "[Analysis]   Group summary #{i + 1}..."
-          consolidate_notes(group.join("\n\n"), episode[:title])
-        end
-
-        # Reduce: synthesize group summaries into final structured analysis
-        puts "[Analysis]   Synthesizing final analysis..."
-        analysis = synthesize(episode[:title], group_summaries)
+        # Single Gemini call with the full transcript
+        puts "[Analysis]   Sending to Gemini..."
+        analysis = synthesize(episode[:title], full_text)
         return update_status(episode[:id], "failed") unless analysis
 
         store_analysis(episode[:id], analysis)
@@ -101,88 +100,43 @@ module VCTools
         update_status(episode[:id], "failed")
       end
 
-      def summarize_chunk(text, episode_title)
+      def synthesize(episode_title, transcript_text)
         prompt = <<~PROMPT
           #{CROSSLINK_CONTEXT}
 
-          You are reading a section of the podcast episode: "#{episode_title}"
+          You have the full transcript of the podcast episode: "#{episode_title}"
 
-          Extract SPECIFIC details from this excerpt. Do NOT generalize. Include:
-          - Exact names of people, companies, products, and funds mentioned
-          - Specific numbers: revenue figures, valuations, round sizes, growth rates, headcounts
-          - Direct arguments or opinions stated by speakers — paraphrase closely
-          - Concrete strategies, tactics, or frameworks described (not vague references)
-          - Any disagreements, debates, or contrarian takes
+          Write a thorough analysis as a JSON object. The "summary_md" field should be a markdown writeup (400-650 words MAX) with this EXACT structure:
 
-          CRITICAL RULES — DO NOT HALLUCINATE:
-          - ONLY include names, companies, titles, and affiliations that are EXPLICITLY stated in the excerpt above.
-          - If you are unsure of a speaker's name, write "a speaker" or "the host" — do NOT guess.
-          - Do NOT invent affiliations (e.g., do NOT say someone is "from Crosslink" or any firm unless the text explicitly says so).
-          - Do NOT add people, companies, or facts from your general knowledge — ONLY use what appears in the excerpt.
-          - If a detail is ambiguous or unclear in the text, leave it out entirely.
+          ### Overview
+          2-3 sentences describing what the episode covered, who the guest/speakers were, and the main theme.
 
-          Excerpt:
-          #{text}
+          ### Major Talking Points
+          #### [Talking Point 1 Title]
+          Detailed paragraph about this talking point with specific names, numbers, and arguments.
 
-          Detailed notes:
-        PROMPT
+          #### [Talking Point 2 Title]
+          Detailed paragraph about this talking point with specific names, numbers, and arguments.
 
-        ollama_generate(CHUNK_MODEL, prompt) || ""
-      end
+          (Continue for each major talking point — typically 3-4 per episode)
 
-      def consolidate_notes(notes_text, episode_title)
-        prompt = <<~PROMPT
-          #{CROSSLINK_CONTEXT}
-
-          You are consolidating notes from multiple sections of: "#{episode_title}"
-
-          Merge these notes into a clean summary. KEEP all specific details:
-          - Preserve every company name, person name, dollar amount, percentage, and metric
-          - Keep direct quotes or close paraphrases of speaker opinions
-          - Maintain specific examples and anecdotes — do not abstract them away
-          - Remove only pure duplicates
-
-          CRITICAL: Do NOT add any names, companies, affiliations, or facts that are not in the notes above. If a name or detail appears only once and seems out of place, it may be an error — flag it with [unverified] or drop it. Do NOT invent connections between people and organizations.
-
-          Notes to consolidate:
-          #{notes_text}
-
-          Consolidated notes (keep all specifics):
-        PROMPT
-
-        ollama_generate(CHUNK_MODEL, prompt) || ""
-      end
-
-      def synthesize(episode_title, chunk_summaries)
-        combined = chunk_summaries.join("\n\n---\n\n")
-
-        prompt = <<~PROMPT
-          #{CROSSLINK_CONTEXT}
-
-          You have detailed notes from the full podcast episode: "#{episode_title}"
-
-          Write a thorough analysis as a JSON object. The "summary_md" field should be a LONG markdown writeup (500-1000 words) structured as follows:
-
-          1. Start with a 2-3 sentence overview of what the episode covered and who was speaking.
-          2. Then break the episode into its major TALKING POINTS (use markdown ### headers for each).
-             For each talking point:
-             - Describe what was discussed with SPECIFIC details (names, numbers, examples)
-             - Include the speakers' actual arguments and reasoning, not just topics
-             - Note any disagreements or contrarian takes
-             - Connect relevant points to early-stage investing where natural
-          IMPORTANT: Do NOT write generic statements. Every sentence should contain a specific fact, name, number, or argument from the episode. If you cannot be specific, leave it out.
-          STRICTLY FORBIDDEN: Do NOT include any concluding section such as "Bottom Line", "Bottom Line for Crosslink", "Conclusion", "Summary", or "Key Takeaways" at the end of summary_md. End the writeup after the last talking point. Any conclusion paragraph will be rejected.
+          Rules for the writeup:
+          - Every sentence must contain a specific fact, name, number, or argument from the episode
+          - Include the speakers' actual arguments and reasoning, not just topics
+          - Note any disagreements or contrarian takes
+          - Do NOT write generic statements. If you cannot be specific, leave it out.
+          - Do NOT include any concluding section (no "Bottom Line", "Conclusion", "Summary", etc.)
+          - End after the last talking point sub-section
 
           CRITICAL — DO NOT HALLUCINATE:
-          - ONLY reference names, companies, titles, and affiliations that appear in the notes provided below.
-          - Do NOT add people or organizations from your general knowledge. For example, do NOT attribute people to "Crosslink Capital" or any firm unless the notes explicitly say so.
+          - ONLY reference names, companies, titles, and affiliations that appear in the transcript.
+          - Do NOT add people or organizations from your general knowledge.
           - If unsure who said something, write "a speaker" or "the host" — never guess a name.
-          - It is better to leave out a detail than to fabricate one. Accuracy is more important than completeness.
+          - Accuracy is more important than completeness.
 
-          Return ONLY valid JSON with this exact structure (no extra text before or after).
-          IMPORTANT: The "summary_md" value must be YOUR ACTUAL WRITEUP — do NOT copy the placeholder text. Write the real 500-1000 word analysis here.
+          Return ONLY valid JSON with this exact structure. ALL fields are REQUIRED — never use null:
           {
-            "summary_md": "WRITE YOUR ACTUAL 500-1000 WORD MARKDOWN ANALYSIS HERE. DO NOT COPY THIS PLACEHOLDER.",
+            "summary_md": "YOUR 400-650 WORD MARKDOWN ANALYSIS",
             "key_takeaways": ["takeaway 1", "takeaway 2", "takeaway 3", "takeaway 4", "takeaway 5"],
             "investment_signals": [
               {"signal": "description", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "reason"}
@@ -191,34 +145,77 @@ module VCTools
             "action_items": ["action 1"]
           }
 
-          Detailed notes from the episode:
-          #{combined}
+          IMPORTANT: You MUST populate every field with real content. Do NOT return null for any field.
 
-          JSON:
+          Full transcript:
+          #{transcript_text}
         PROMPT
 
-        raw = ollama_generate(SYNTH_MODEL, prompt)
+        raw = gemini_generate(prompt)
+        return nil unless raw
+
+        result = parse_json_response(raw)
+
+        # Retry up to 2 times on failure
+        2.times do |attempt|
+          break if result
+          puts "[Analysis]   Retry #{attempt + 1}..."
+          raw = gemini_generate(prompt)
+          result = parse_json_response(raw) if raw
+        end
+
+        result
+      end
+
+      def gemini_generate(prompt)
+        response = @client.post(
+          "/v1beta/models/#{GEMINI_MODEL}:generateContent?key=#{@api_key}",
+          {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.3,
+              maxOutputTokens: 16384,
+              thinkingConfig: { thinkingBudget: 1024 }
+            }
+          }
+        )
+
+        body = response.body
+        if body.is_a?(Hash) && body["candidates"]
+          text = body.dig("candidates", 0, "content", "parts", 0, "text")
+          return text.strip if text
+        end
+
+        error = body.dig("error", "message") if body.is_a?(Hash)
+        puts "[Analysis] Gemini error: #{error || body.inspect[0..200]}"
+        nil
+
+      rescue => e
+        puts "[Analysis] Gemini request error: #{e.class} — #{e.message}"
+        nil
+      end
+
+      def parse_json_response(raw)
         return nil unless raw
 
         # Extract the JSON block even if the model adds surrounding text
         json_match = raw.match(/\{.*\}/m)
         return nil unless json_match
 
-        result = JSON.parse(json_match[0])
+        json_str = json_match[0]
 
-        # Reject if the model copied the placeholder instead of writing a real summary
+        # Clean up common LLM JSON issues
+        json_str = json_str
+          .gsub(/[\x00-\x1F]/) { |c| c == "\n" || c == "\t" ? c : "" }
+          .gsub(/,\s*([}\]])/, '\1')
+
+        result = JSON.parse(json_str)
+
+        # Validate summary is real content
         summary = result["summary_md"].to_s
-        if summary.length < 100 || summary.include?("WRITE YOUR ACTUAL") || summary.include?("500-1000 word markdown writeup")
-          puts "[Analysis] Model returned placeholder instead of real summary — retrying"
-          raw = ollama_generate(SYNTH_MODEL, prompt)
-          return nil unless raw
-          json_match = raw.match(/\{.*\}/m)
-          return nil unless json_match
-          result = JSON.parse(json_match[0])
-          if result["summary_md"].to_s.length < 100
-            puts "[Analysis] Retry also returned placeholder — skipping"
-            return nil
-          end
+        if summary.length < 100
+          puts "[Analysis] Summary too short (#{summary.length} chars)"
+          return nil
         end
 
         result
@@ -237,29 +234,10 @@ module VCTools
           investment_signals_json: analysis["investment_signals"].to_json,
           risks_json:              analysis["risks"].to_json,
           action_items_json:       analysis["action_items"].to_json,
-          engine:                  "local",
-          model:                   SYNTH_MODEL,
+          engine:                  "gemini",
+          model:                   GEMINI_MODEL,
           created_at:              now
         )
-      end
-
-      def ollama_generate(model, prompt)
-        response = @client.post("/api/generate", {
-          model:  model,
-          prompt: prompt,
-          stream: false
-        })
-
-        if response.body.is_a?(Hash) && response.body["response"]
-          response.body["response"].strip
-        else
-          puts "[Analysis] Unexpected Ollama response: #{response.body.inspect[0..200]}"
-          nil
-        end
-
-      rescue => e
-        puts "[Analysis] Ollama error: #{e.class} — #{e.message}"
-        nil
       end
 
       def update_status(episode_id, status)
