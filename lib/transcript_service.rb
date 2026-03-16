@@ -41,10 +41,10 @@ module VCTools
         per_pod = (limit / grouped.keys.length.to_f).ceil
 
         grouped.each_value do |eps|
-          result.concat(eps.first(per_pod))
+          result.concat(eps.last(per_pod))
         end
 
-        result.sort_by { |ep| ep[:published_at] }.first(limit)
+        result.sort_by { |ep| ep[:published_at] }.reverse.first(limit)
       end
 
       def process_episode(episode)

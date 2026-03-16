@@ -113,7 +113,8 @@ module VCTools
 
         # Full writeup for each episode
         analyzed.each_with_index do |ep, i|
-          lines << "## #{i + 1}. #{ep[:podcast_name]}: #{ep[:title]}"
+          pub_date = ep[:published_at]&.strftime("%-m/%-d/%Y") || "Unknown"
+          lines << "## #{i + 1}. #{ep[:podcast_name]}: #{ep[:title]} (#{pub_date})"
           lines << ""
 
           # The summary_md contains Overview + Major Talking Points from the LLM

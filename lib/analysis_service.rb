@@ -106,7 +106,7 @@ module VCTools
 
           You have the full transcript of the podcast episode: "#{episode_title}"
 
-          Write a thorough analysis as a JSON object. The "summary_md" field should be a markdown writeup (400-650 words MAX) with this EXACT structure:
+          Write a thorough analysis as a JSON object. The "summary_md" field should be a concise markdown writeup (300-500 words MAX) with this EXACT structure:
 
           ### Overview
           2-3 sentences describing what the episode covered, who the guest/speakers were, and the main theme.
@@ -136,13 +136,13 @@ module VCTools
 
           Return ONLY valid JSON with this exact structure. ALL fields are REQUIRED — never use null:
           {
-            "summary_md": "YOUR 400-650 WORD MARKDOWN ANALYSIS",
-            "key_takeaways": ["takeaway 1", "takeaway 2", "takeaway 3", "takeaway 4", "takeaway 5"],
+            "summary_md": "YOUR 300-500 WORD MARKDOWN ANALYSIS",
+            "key_takeaways": ["1 sentence max per takeaway", "...", "... (exactly 4 or 5 takeaways)"],
             "investment_signals": [
-              {"signal": "description", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "reason"}
+              {"signal": "1 sentence max", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "1 sentence max"}
             ],
-            "risks": ["risk 1", "risk 2"],
-            "action_items": ["action 1"]
+            "risks": ["1 sentence max"],
+            "action_items": ["1 sentence max"]
           }
 
           IMPORTANT: You MUST populate every field with real content. Do NOT return null for any field.
@@ -211,10 +211,21 @@ module VCTools
 
         result = JSON.parse(json_str)
 
+        # Replace any null fields with empty arrays
+        %w[key_takeaways investment_signals risks action_items].each do |field|
+          result[field] = [] if result[field].nil?
+        end
+
         # Validate summary is real content
         summary = result["summary_md"].to_s
         if summary.length < 100
           puts "[Analysis] Summary too short (#{summary.length} chars)"
+          return nil
+        end
+
+        # Validate required array fields are populated
+        if result["key_takeaways"].empty? || result["investment_signals"].empty?
+          puts "[Analysis] Missing key_takeaways or investment_signals — will retry"
           return nil
         end
 

@@ -13,8 +13,10 @@ require "podcast_ingestor"
 require "transcript_service"
 require "analysis_service"
 require "digest_builder"
+require "database"
 
 limit = ENV["LIMIT"]&.to_i
+target = limit || 3
 
 puts "=" * 60
 puts "VC Podcast Pipeline — #{Time.now.strftime('%Y-%m-%d %H:%M')}"
@@ -28,12 +30,35 @@ puts
 
 # Step 2: Transcribe new episodes
 puts "--- Step 2: Transcribe Episodes ---"
-VCTools::Podcast::TranscriptService.new.run(limit: limit)
+VCTools::Podcast::TranscriptService.new.run(limit: target)
 puts
 
 # Step 3: Analyze transcribed episodes
 puts "--- Step 3: Analyze Episodes ---"
-VCTools::Podcast::AnalysisService.new.run(limit: limit)
+VCTools::Podcast::AnalysisService.new.run(limit: target)
+puts
+
+# Step 3b: Backfill — if any episodes failed analysis, transcribe+analyze more
+#          until we have enough analyzed episodes for the digest
+db = VCTools::Podcast::Database.connect
+today_midnight = Time.new(Time.now.year, Time.now.month, Time.now.day, 0, 0, 0).utc
+max_backfill_attempts = 5
+
+max_backfill_attempts.times do |attempt|
+  analyzed_today = db[:episodes].where(status: "analyzed").where { updated_at >= today_midnight }.count
+  remaining = db[:episodes].where(status: "new").count
+
+  break if analyzed_today >= target
+  break if remaining == 0
+
+  puts "--- Backfill #{attempt + 1}: #{analyzed_today}/#{target} analyzed, picking another episode ---"
+  VCTools::Podcast::TranscriptService.new.run(limit: 1)
+  VCTools::Podcast::AnalysisService.new.run(limit: 1)
+  puts
+end
+
+analyzed_today = db[:episodes].where(status: "analyzed").where { updated_at >= today_midnight }.count
+puts "[Pipeline] #{analyzed_today} episodes analyzed today"
 puts
 
 # Step 4: Build and send daily digest
