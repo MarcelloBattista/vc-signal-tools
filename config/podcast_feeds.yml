@@ -82,3 +82,21 @@ podcasts:
       - investing
       - early-stage
     max_episodes_per_run: 5
+
+  - name: "Invest Like the Best"
+    url: "https://feeds.megaphone.fm/investlikethebest"
+    tags:
+      - investing
+      - business
+      - founders
+      - frameworks
+    max_episodes_per_run: 5
+
+  - name: "Hard Fork"
+    url: "https://feeds.simplecast.com/6HKOhNgS"
+    tags:
+      - tech
+      - ai
+      - news
+      - policy
+    max_episodes_per_run: 5
