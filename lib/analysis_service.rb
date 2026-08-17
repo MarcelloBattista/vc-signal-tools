@@ -1,49 +1,46 @@
 # frozen_string_literal: true
 
 require "json"
-require "faraday"
 require "time"
 
 require_relative "database"
+require_relative "episode_selection"
+require_relative "gemini_client"
+require_relative "investment_context"
 
 module VCTools
   module Podcast
+    # Stage 4 of 4: generates the reader-facing episode summary from the ranked,
+    # clustered insights produced by the earlier stages — not from the raw transcript.
+    # Class/file name kept as AnalysisService (not renamed) so bin/podcast_analyze,
+    # bin/run_podcast_pipeline, and bin/scheduler need no call-site changes.
     class AnalysisService
 
-      GEMINI_URL   = "https://generativelanguage.googleapis.com"
       GEMINI_MODEL = "gemini-2.5-flash"
+      PROMPT_VERSION = "atomic-v1"
 
-      CROSSLINK_CONTEXT = <<~CTX
-        You are an AI assistant helping a first-year analyst at an early-stage venture firm.
-        The firm invests $1-9M into AI, dev tools, infrastructure, marketplaces, consumer, vertical SaaS, and health tech.
-        They do NOT invest in biotech or crypto. Focus on insights relevant to early-stage investing and emerging technology.
-      CTX
+      # Kept for backward compatibility — nothing outside this file references it anymore,
+      # but it's the same constant name previously exported here.
+      CROSSLINK_CONTEXT = VCTools::Podcast::CROSSLINK_CONTEXT
 
       def initialize
-        @db          = VCTools::Podcast::Database.connect
-        @episodes    = @db[:episodes]
-        @transcripts = @db[:transcripts]
-        @chunks      = @db[:transcript_chunks]
-        @analyses    = @db[:episode_analyses]
+        @db        = VCTools::Podcast::Database.connect
+        @episodes  = @db[:episodes]
+        @insights  = @db[:episode_insights]
+        @clusters  = @db[:episode_insight_clusters]
+        @analyses  = @db[:episode_analyses]
 
         require "dotenv/load"
-        @api_key = ENV["GEMINI_API_KEY"]
-
-        @client = Faraday.new(url: GEMINI_URL) do |f|
-          f.request  :json
-          f.response :json
-          f.options.timeout      = 120
-          f.options.open_timeout = 10
-        end
+        @gemini = VCTools::Podcast::GeminiClient.new(model: GEMINI_MODEL)
       end
 
       def run(limit: nil)
-        unless @api_key
+        unless @gemini.api_key?
           puts "[Analysis] No GEMINI_API_KEY set — skipping"
           return
         end
 
-        pending = diverse_episodes("transcribed", limit)
+        pending = VCTools::Podcast::EpisodeSelection.diverse(@episodes, status: "clustered", limit: limit)
         puts "[Analysis] #{pending.length} episodes to analyze"
 
         pending.each { |episode| analyze_episode(episode) }
@@ -51,210 +48,198 @@ module VCTools
 
       private
 
-      # Pick episodes evenly across podcasts so one feed doesn't dominate
-      def diverse_episodes(status, limit)
-        all = @episodes.where(status: status).order(:published_at).all
-        return all unless limit && all.length > limit
-
-        grouped = all.group_by { |ep| ep[:podcast_id] }
-        result  = []
-        per_pod = (limit / grouped.keys.length.to_f).ceil
-
-        grouped.each_value do |eps|
-          result.concat(eps.first(per_pod))
-        end
-
-        result.sort_by { |ep| ep[:published_at] }.reverse.first(limit)
-      end
-
       def analyze_episode(episode)
         puts "[Analysis] Analyzing: #{episode[:title]}"
 
-        transcript = @transcripts.where(episode_id: episode[:id]).first
-        unless transcript
-          puts "[Analysis] No transcript for episode #{episode[:id]}"
-          return update_status(episode[:id], "failed")
+        insights = @insights.where(episode_id: episode[:id]).order(Sequel.desc(:ranking_score)).all
+        if insights.empty?
+          puts "[Analysis] No insights for episode #{episode[:id]}"
+          return update_status(episode[:id], "failed", "analyzed")
         end
 
-        # Get the full transcript text from chunks
-        chunks = @chunks.where(transcript_id: transcript[:id]).order(:chunk_index).all
-        if chunks.empty?
-          puts "[Analysis] No chunks for transcript #{transcript[:id]}"
-          return update_status(episode[:id], "failed")
-        end
+        clusters = @clusters.where(episode_id: episode[:id]).all
 
-        full_text = chunks.map { |c| c[:text] }.join("\n\n")
-        puts "[Analysis]   Transcript: #{chunks.length} chunks, #{full_text.length} chars"
+        sections = synthesize(episode[:title], insights, clusters)
+        return update_status(episode[:id], "failed", "analyzed") unless sections
 
-        # Single Gemini call with the full transcript
-        puts "[Analysis]   Sending to Gemini..."
-        analysis = synthesize(episode[:title], full_text)
-        return update_status(episode[:id], "failed") unless analysis
-
-        store_analysis(episode[:id], analysis)
-        update_status(episode[:id], "analyzed")
+        store_analysis(episode[:id], sections, insights.length, clusters.length)
+        update_status(episode[:id], "analyzed", nil)
         puts "[Analysis] Done: #{episode[:title]}"
 
       rescue => e
         puts "[Analysis] Error (#{episode[:title]}): #{e.message}"
-        update_status(episode[:id], "failed")
+        update_status(episode[:id], "failed", "analyzed")
       end
 
-      def synthesize(episode_title, transcript_text)
-        prompt = <<~PROMPT
-          #{CROSSLINK_CONTEXT}
-
-          You have the full transcript of the podcast episode: "#{episode_title}"
-
-          Write a thorough analysis as a JSON object. The "summary_md" field should be a concise markdown writeup (300-500 words MAX) with this EXACT structure:
-
-          ### Overview
-          2-3 sentences describing what the episode covered, who the guest/speakers were, and the main theme.
-
-          ### Major Talking Points
-          #### [Talking Point 1 Title]
-          Detailed paragraph about this talking point with specific names, numbers, and arguments.
-
-          #### [Talking Point 2 Title]
-          Detailed paragraph about this talking point with specific names, numbers, and arguments.
-
-          (Continue for each major talking point — typically 3-4 per episode)
-
-          Rules for the writeup:
-          - Every sentence must contain a specific fact, name, number, or argument from the episode
-          - Include the speakers' actual arguments and reasoning, not just topics
-          - Note any disagreements or contrarian takes
-          - Do NOT write generic statements. If you cannot be specific, leave it out.
-          - Do NOT include any concluding section (no "Bottom Line", "Conclusion", "Summary", etc.)
-          - End after the last talking point sub-section
-
-          CRITICAL — DO NOT HALLUCINATE:
-          - ONLY reference names, companies, titles, and affiliations that appear in the transcript.
-          - Do NOT add people or organizations from your general knowledge.
-          - If unsure who said something, write "a speaker" or "the host" — never guess a name.
-          - Accuracy is more important than completeness.
-
-          Return ONLY valid JSON with this exact structure. ALL fields are REQUIRED — never use null:
+      def synthesize(episode_title, insights, clusters)
+        themes = clusters.map do |c|
+          members = insights.select { |i| i[:cluster_id] == c[:id] }
           {
-            "summary_md": "YOUR 300-500 WORD MARKDOWN ANALYSIS",
-            "key_takeaways": ["1 sentence max per takeaway", "...", "... (exactly 4 or 5 takeaways)"],
-            "investment_signals": [
-              {"signal": "1 sentence max", "sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech", "why_it_matters": "1 sentence max"}
-            ],
-            "risks": ["1 sentence max"],
-            "action_items": ["1 sentence max"]
+            theme: c[:theme],
+            theme_summary: c[:theme_summary],
+            supporting_claims: members.map { |m| m[:claim] }
+          }
+        end
+
+        standalone = insights.reject { |i| i[:cluster_id] }.map { |i| insight_payload(i) }
+        clustered_members = insights.select { |i| i[:cluster_id] }.map { |i| insight_payload(i) }
+
+        prompt = <<~PROMPT
+          #{VCTools::Podcast::CROSSLINK_CONTEXT}
+
+          You are writing the reader-facing summary for the VC podcast episode
+          "#{episode_title}", from already-ranked and deduplicated observations — not
+          from the raw transcript. Write from this structured data only.
+
+          Synthesized themes (each already consolidates several similar observations):
+          #{themes.to_json}
+
+          Individual observations that belong to a theme above (for extra detail/citation):
+          #{clustered_members.to_json}
+
+          Standalone observations not part of any theme (each stands on its own):
+          #{standalone.to_json}
+
+          Produce a JSON object with these fields. Every sentence must be grounded in the
+          data above — do not add facts, names, or companies not present in it. Omit a
+          field (return an empty array) if the episode genuinely has nothing for it; do not
+          pad with generic filler to populate a section.
+
+          BE CONCISE. Every field should be as short as possible while staying specific and
+          grounded — prefer one tight clause over a full sentence, and one sentence over two.
+          This is a scannable digest, not a report.
+
+          {
+            "thirty_second_take": "AT MOST 2 sentences on why this episode matters",
+            "top_insights": [{"insight": "...", "evidence": "...", "implication": "...", "timestamp": "MM:SS or empty string"}],
+            "contrarian_takes": [{"claim": "...", "consensus_view": "...", "reason_for_disagreement": "...", "implication": "..."}],
+            "markets_theses": [{"sector": "AI|DevTools|Infra|Marketplace|Consumer|VerticalSaaS|HealthTech|other", "signal": "...", "why_it_matters": "...", "direction": "Bullish|Bearish|Neutral|Mixed"}],
+            "companies": [{"name": "...", "context": "...", "sentiment": "positive|negative|neutral|mixed", "why_it_matters": "..."}],
+            "predictions": [{"prediction": "...", "speaker": "...", "time_horizon": "...", "timestamp": "MM:SS or empty string"}],
+            "frameworks": [{"name": "...", "description": "...", "investment_relevance": "..."}],
+            "numbers": [{"metric": "...", "value": "...", "context": "..."}],
+            "watch": ["short signal/risk/open-question strings"],
+            "best_moments": [{"timestamp": "MM:SS", "description": "..."}]
           }
 
-          IMPORTANT: You MUST populate every field with real content. Do NOT return null for any field.
+          Cap top_insights at 3, best_moments at 3. Order top_insights by importance. Keep
+          "evidence" and "implication" to one short clause each, not full sentences.
 
-          Full transcript:
-          #{transcript_text}
+          CRITICAL — DO NOT HALLUCINATE: only use names/companies/timestamps present in the
+          data above. If unsure who said something, write "a speaker" or "the host".
+
+          Return ONLY the JSON object described above.
         PROMPT
 
-        raw = gemini_generate(prompt)
-        return nil unless raw
-
-        result = parse_json_response(raw)
-
-        # Retry up to 2 times on failure
-        2.times do |attempt|
-          break if result
-          puts "[Analysis]   Retry #{attempt + 1}..."
-          raw = gemini_generate(prompt)
-          result = parse_json_response(raw) if raw
+        @gemini.generate_json(prompt, max_output_tokens: 16_384) do |result|
+          result["thirty_second_take"].to_s.length >= 20 &&
+            Array(result["top_insights"]).any?
         end
-
-        result
       end
 
-      def gemini_generate(prompt)
-        response = @client.post(
-          "/v1beta/models/#{GEMINI_MODEL}:generateContent?key=#{@api_key}",
-          {
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 16384,
-              thinkingConfig: { thinkingBudget: 1024 }
-            }
-          }
-        )
-
-        body = response.body
-        if body.is_a?(Hash) && body["candidates"]
-          text = body.dig("candidates", 0, "content", "parts", 0, "text")
-          return text.strip if text
-        end
-
-        error = body.dig("error", "message") if body.is_a?(Hash)
-        puts "[Analysis] Gemini error: #{error || body.inspect[0..200]}"
-        nil
-
-      rescue => e
-        puts "[Analysis] Gemini request error: #{e.class} — #{e.message}"
-        nil
+      def insight_payload(i)
+        {
+          type: i[:insight_type], speaker: i[:speaker_label], claim: i[:claim],
+          evidence: i[:evidence], implication: i[:implication],
+          timestamp_start: ms_to_mmss(i[:timestamp_start_ms]), ranking_score: i[:ranking_score]
+        }
       end
 
-      def parse_json_response(raw)
-        return nil unless raw
-
-        # Extract the JSON block even if the model adds surrounding text
-        json_match = raw.match(/\{.*\}/m)
-        return nil unless json_match
-
-        json_str = json_match[0]
-
-        # Clean up common LLM JSON issues
-        json_str = json_str
-          .gsub(/[\x00-\x1F]/) { |c| c == "\n" || c == "\t" ? c : "" }
-          .gsub(/,\s*([}\]])/, '\1')
-
-        result = JSON.parse(json_str)
-
-        # Replace any null fields with empty arrays
-        %w[key_takeaways investment_signals risks action_items].each do |field|
-          result[field] = [] if result[field].nil?
-        end
-
-        # Validate summary is real content
-        summary = result["summary_md"].to_s
-        if summary.length < 100
-          puts "[Analysis] Summary too short (#{summary.length} chars)"
-          return nil
-        end
-
-        # Validate required array fields are populated
-        if result["key_takeaways"].empty? || result["investment_signals"].empty?
-          puts "[Analysis] Missing key_takeaways or investment_signals — will retry"
-          return nil
-        end
-
-        result
-
-      rescue JSON::ParserError => e
-        puts "[Analysis] JSON parse error: #{e.message}"
-        nil
+      def ms_to_mmss(ms)
+        return "" unless ms
+        total_seconds = (ms / 1000).to_i
+        h = total_seconds / 3600
+        m = (total_seconds % 3600) / 60
+        s = total_seconds % 60
+        h.positive? ? format("%d:%02d:%02d", h, m, s) : format("%02d:%02d", m, s)
       end
 
-      def store_analysis(episode_id, analysis)
+      def store_analysis(episode_id, sections, insight_count, cluster_count)
         now = Time.now.utc
+        markdown = render_summary_markdown(sections)
+
+        key_takeaways = Array(sections["top_insights"]).first(3).map { |t| t["insight"] }
+        investment_signals = Array(sections["markets_theses"]).map do |m|
+          { "signal" => m["signal"], "sector" => m["sector"], "why_it_matters" => m["why_it_matters"] }
+        end
+
         @analyses.insert(
           episode_id:              episode_id,
-          summary_md:              analysis["summary_md"],
-          key_takeaways_json:      analysis["key_takeaways"].to_json,
-          investment_signals_json: analysis["investment_signals"].to_json,
-          risks_json:              analysis["risks"].to_json,
-          action_items_json:       analysis["action_items"].to_json,
+          summary_md:              markdown,
+          key_takeaways_json:      key_takeaways.to_json,
+          investment_signals_json: investment_signals.to_json,
+          risks_json:              Array(sections["watch"]).to_json,
+          action_items_json:       [].to_json,
+          thirty_second_take:      sections["thirty_second_take"],
+          sections_json:           sections.to_json,
+          insight_count:           insight_count,
+          cluster_count:           cluster_count,
           engine:                  "gemini",
           model:                   GEMINI_MODEL,
+          prompt_version:          PROMPT_VERSION,
           created_at:              now
         )
       end
 
-      def update_status(episode_id, status)
+      def render_summary_markdown(s)
+        lines = []
+
+        lines << "### 30-Second Take"
+        lines << s["thirty_second_take"].to_s
+        lines << ""
+
+        render_list(lines, "Top Insights", Array(s["top_insights"]).first(3)) do |i|
+          ts = i["timestamp"].to_s.empty? ? "" : " (#{i['timestamp']})"
+          "**#{i['insight']}** — #{i['evidence']} → #{i['implication']}#{ts}"
+        end
+
+        render_list(lines, "Contrarian Takes", Array(s["contrarian_takes"])) do |c|
+          "**#{c['claim']}** — vs. consensus (#{c['consensus_view']}): #{c['reason_for_disagreement']} → #{c['implication']}"
+        end
+
+        render_list(lines, "Markets & Investment Theses", Array(s["markets_theses"])) do |m|
+          "**[#{m['sector']}]** #{m['signal']} — #{m['why_it_matters']} (#{m['direction']})"
+        end
+
+        render_list(lines, "Companies Mentioned", Array(s["companies"])) do |c|
+          "**#{c['name']}** — #{c['context']} (#{c['sentiment']}) — #{c['why_it_matters']}"
+        end
+
+        render_list(lines, "Predictions", Array(s["predictions"])) do |p|
+          ts = p["timestamp"].to_s.empty? ? "" : " (#{p['timestamp']})"
+          "#{p['prediction']} — #{p['speaker']}, #{p['time_horizon']}#{ts}"
+        end
+
+        render_list(lines, "Frameworks", Array(s["frameworks"])) do |f|
+          "**#{f['name']}**: #{f['description']} — #{f['investment_relevance']}"
+        end
+
+        render_list(lines, "Numbers That Matter", Array(s["numbers"])) do |n|
+          "**#{n['metric']}**: #{n['value']} — #{n['context']}"
+        end
+
+        render_list(lines, "What to Watch", Array(s["watch"])) { |w| w.to_s }
+
+        render_list(lines, "Best Moments", Array(s["best_moments"])) do |b|
+          "#{b['timestamp']} — #{b['description']}"
+        end
+
+        lines.join("\n").rstrip
+      end
+
+      def render_list(lines, heading, items)
+        return if items.empty?
+
+        lines << "### #{heading}"
+        items.each { |item| lines << "- #{yield(item)}" }
+        lines << ""
+      end
+
+      def update_status(episode_id, status, failed_stage)
         @episodes.where(id: episode_id).update(
-          status:     status,
-          updated_at: Time.now.utc
+          status:       status,
+          failed_stage: failed_stage,
+          updated_at:   Time.now.utc
         )
       end
 

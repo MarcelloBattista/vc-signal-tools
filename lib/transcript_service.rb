@@ -6,6 +6,7 @@ require "shellwords"
 require "time"
 
 require_relative "database"
+require_relative "episode_selection"
 
 module VCTools
   module Podcast
@@ -14,6 +15,7 @@ module VCTools
       WHISPER_MODEL = File.expand_path("~/.whisper/models/ggml-base.en.bin")
       WHISPER_CMD   = "whisper-cli"
       CHUNK_WORDS   = 350  # ~500 tokens per chunk
+      SEGMENT_RE    = /^\[(?<start>[\d:.]+)\s*-->\s*(?<end>[\d:.]+)\]\s*(?<text>.*)$/
 
       def initialize
         @db          = VCTools::Podcast::Database.connect
@@ -23,29 +25,13 @@ module VCTools
       end
 
       def run(limit: nil)
-        pending = diverse_episodes("new", limit)
+        pending = VCTools::Podcast::EpisodeSelection.diverse(@episodes, status: "new", limit: limit)
         puts "[Transcript] #{pending.length} episodes to process"
 
         pending.each { |episode| process_episode(episode) }
       end
 
       private
-
-      # Pick episodes evenly across podcasts so one feed doesn't dominate
-      def diverse_episodes(status, limit)
-        all = @episodes.where(status: status).order(:published_at).all
-        return all unless limit && all.length > limit
-
-        grouped = all.group_by { |ep| ep[:podcast_id] }
-        result  = []
-        per_pod = (limit / grouped.keys.length.to_f).ceil
-
-        grouped.each_value do |eps|
-          result.concat(eps.last(per_pod))
-        end
-
-        result.sort_by { |ep| ep[:published_at] }.reverse.first(limit)
-      end
 
       def process_episode(episode)
         puts "[Transcript] Processing: #{episode[:title]}"
@@ -58,10 +44,10 @@ module VCTools
         wav_path = convert_to_wav(audio_path)
         return update_status(episode[:id], "failed") unless wav_path
 
-        raw_text = transcribe(wav_path)
-        return update_status(episode[:id], "failed") unless raw_text
+        segments = transcribe(wav_path)
+        return update_status(episode[:id], "failed") unless segments && !segments.empty?
 
-        store_transcript(episode[:id], raw_text)
+        store_transcript(episode[:id], segments)
         update_status(episode[:id], "transcribed")
         puts "[Transcript] Done: #{episode[:title]}"
 
@@ -98,25 +84,37 @@ module VCTools
         nil
       end
 
+      # Returns whisper-cli's output as an array of {start_ms:, end_ms:, text:} segments,
+      # preserving timestamps instead of discarding them, so downstream stages can ground
+      # claims/insights in real audio offsets.
       def transcribe(wav_path)
         cmd    = "#{WHISPER_CMD} -m #{WHISPER_MODEL.shellescape} #{wav_path.shellescape} 2>/dev/null"
         output = `#{cmd}`
         return nil if output.nil? || output.strip.empty?
 
-        # Strip timestamp prefix from each line: [00:00:00.000 --> 00:00:05.000]   Text
-        output.lines
-              .map  { |line| line.sub(/^\[[\d:\.]+\s*-->\s*[\d:\.]+\]\s*/, "").strip }
-              .reject(&:empty?)
-              .join(" ")
+        output.lines.filter_map do |line|
+          m = line.match(SEGMENT_RE)
+          next unless m
+          text = m[:text].strip
+          next if text.empty?
+
+          { start_ms: timestamp_to_ms(m[:start]), end_ms: timestamp_to_ms(m[:end]), text: text }
+        end
 
       rescue => e
         puts "[Transcript] Transcription failed: #{e.message}"
         nil
       end
 
-      def store_transcript(episode_id, raw_text)
-        now            = Time.now.utc
-        token_estimate = (raw_text.length / 4.0).ceil
+      # "00:12:34.500" -> milliseconds
+      def timestamp_to_ms(ts)
+        h, m, s = ts.split(":")
+        ((h.to_i * 3600 + m.to_i * 60 + s.to_f) * 1000).round
+      end
+
+      def store_transcript(episode_id, segments)
+        now      = Time.now.utc
+        raw_text = segments.map { |s| s[:text] }.join(" ")
 
         transcript_id = @transcripts.insert(
           episode_id:     episode_id,
@@ -125,24 +123,54 @@ module VCTools
           model:          "whisper-base.en",
           language:       "en",
           raw_text:       raw_text,
-          token_estimate: token_estimate,
+          token_estimate: (raw_text.length / 4.0).ceil,
           created_at:     now
         )
 
-        store_chunks(transcript_id, raw_text)
+        store_chunks(transcript_id, segments)
       end
 
-      def store_chunks(transcript_id, text)
-        words = text.split
-        words.each_slice(CHUNK_WORDS).with_index do |chunk_words, index|
-          chunk_text = chunk_words.join(" ")
+      # Groups whole segments (not raw words) into ~CHUNK_WORDS-sized chunks so chunk
+      # boundaries land on segment boundaries. Each chunk's text keeps inline [MM:SS]
+      # timestamp markers so later stages can cite real offsets without re-deriving them.
+      def store_chunks(transcript_id, segments)
+        groups = []
+        current = []
+        current_words = 0
+
+        segments.each do |seg|
+          current << seg
+          current_words += seg[:text].split.length
+
+          if current_words >= CHUNK_WORDS
+            groups << current
+            current = []
+            current_words = 0
+          end
+        end
+        groups << current unless current.empty?
+
+        groups.each_with_index do |group, index|
+          chunk_text = group.map { |s| "[#{format_mmss(s[:start_ms])}] #{s[:text]}" }.join(" ")
+
           @chunks.insert(
             transcript_id:  transcript_id,
             chunk_index:    index,
             text:           chunk_text,
-            token_estimate: (chunk_text.length / 4.0).ceil
+            token_estimate: (chunk_text.length / 4.0).ceil,
+            start_ms:       group.first[:start_ms],
+            end_ms:         group.last[:end_ms]
           )
         end
+      end
+
+      # milliseconds -> "MM:SS" (or "H:MM:SS" past an hour)
+      def format_mmss(ms)
+        total_seconds = (ms / 1000).to_i
+        h = total_seconds / 3600
+        m = (total_seconds % 3600) / 60
+        s = total_seconds % 60
+        h.positive? ? format("%d:%02d:%02d", h, m, s) : format("%02d:%02d", m, s)
       end
 
       def update_status(episode_id, status)

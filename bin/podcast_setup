@@ -6,4 +6,5 @@ $LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
 require "database"
 
 VCTools::Podcast::Database.setup!
+VCTools::Podcast::Database.migrate!
 puts "Podcast schema is ready."

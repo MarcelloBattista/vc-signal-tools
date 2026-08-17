@@ -109,7 +109,116 @@ module VCTools # consistent naming
                     DateTime :created_at, null: false
                     DateTime :updated_at, null: false
                 end
+
+                db.create_table?(:companies) do
+                    primary_key :id
+                    String :name, null: false
+                    String :normalized_name, null: false, unique: true
+                    DateTime :created_at, null: false
+                    DateTime :updated_at, null: false
+                end
+
+                db.create_table?(:sectors) do
+                    primary_key :id
+                    String :name, null: false
+                    String :normalized_name, null: false, unique: true
+                    DateTime :created_at, null: false
+                    DateTime :updated_at, null: false
+                end
+
+                db.create_table?(:episode_insights) do
+                    primary_key :id
+                    foreign_key :episode_id, :episodes, null: false
+                    String :insight_uid, null: false
+                    String :insight_type, null: false
+                    String :speaker_label
+                    String :category
+                    String :claim, text: true
+                    String :evidence, text: true
+                    String :implication, text: true
+                    Integer :timestamp_start_ms
+                    Integer :timestamp_end_ms
+                    String :people_json, text: true
+                    String :metrics_json, text: true
+                    Integer :score_importance
+                    Integer :score_novelty
+                    Integer :score_specificity
+                    Integer :score_actionability
+                    Integer :score_credibility
+                    Float :ranking_score
+                    String :ranking_bonuses_json, text: true
+                    String :ranking_penalties_json, text: true
+                    String :ranking_version
+                    foreign_key :cluster_id, :episode_insight_clusters
+                    DateTime :created_at, null: false
+                    index [:episode_id]
+                    index [:insight_type]
+                    index [:ranking_score]
+                    index [:insight_type, :ranking_score]
+                    index [:episode_id, :insight_uid], unique: true
+                end
+
+                db.create_table?(:episode_insight_clusters) do
+                    primary_key :id
+                    foreign_key :episode_id, :episodes, null: false
+                    String :theme, text: true
+                    String :theme_summary, text: true
+                    Integer :representative_insight_id
+                    Integer :member_count, null: false, default: 0
+                    DateTime :created_at, null: false
+                    index [:episode_id]
+                end
+
+                db.create_table?(:episode_insight_companies) do
+                    primary_key :id
+                    foreign_key :insight_id, :episode_insights, null: false
+                    foreign_key :company_id, :companies, null: false
+                    index [:insight_id]
+                    index [:company_id]
+                end
+
+                db.create_table?(:episode_insight_sectors) do
+                    primary_key :id
+                    foreign_key :insight_id, :episode_insights, null: false
+                    foreign_key :sector_id, :sectors, null: false
+                    index [:insight_id]
+                    index [:sector_id]
+                end
             end #self.setup end
+
+            # Additive-only schema changes for tables that already exist in production.
+            # create_table? is a no-op on existing tables, so column/index additions to
+            # already-created tables must go through explicit, idempotent checks here.
+            def self.migrate!
+                db = connect
+
+                add_column_if_missing(db, :transcript_chunks, :start_ms, Integer)
+                add_column_if_missing(db, :transcript_chunks, :end_ms, Integer)
+
+                add_column_if_missing(db, :episodes, :failed_stage, String)
+                add_index_if_missing(db, :episodes, :podcast_id)
+
+                add_column_if_missing(db, :episode_analyses, :thirty_second_take, String, text: true)
+                add_column_if_missing(db, :episode_analyses, :insight_count, Integer)
+                add_column_if_missing(db, :episode_analyses, :cluster_count, Integer)
+                add_column_if_missing(db, :episode_analyses, :sections_json, String, text: true)
+
+                # Pre-existing production drift: this column was added directly against
+                # the live DB and used by digest_builder.rb, but was never declared here.
+                add_column_if_missing(db, :daily_digests, :episode_titles, String, text: true)
+            end
+
+            def self.add_column_if_missing(db, table, column, type, **opts)
+                return unless db.table_exists?(table)
+                return if db.schema(table).map(&:first).include?(column)
+                db.alter_table(table) { add_column column, type, **opts }
+            end
+
+            def self.add_index_if_missing(db, table, column)
+                return unless db.table_exists?(table)
+                return if db.indexes(table).values.any? { |idx| idx[:columns] == [column] }
+                db.alter_table(table) { add_index column }
+            end
         end # database end
     end # podcast end
 end # VC Tools end

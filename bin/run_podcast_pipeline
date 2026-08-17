@@ -10,8 +10,7 @@ $LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
 
 require "dotenv/load"
 require "podcast_ingestor"
-require "transcript_service"
-require "analysis_service"
+require "podcast_pipeline_runner"
 require "digest_builder"
 require "database"
 
@@ -28,18 +27,12 @@ puts "--- Step 1: Ingest RSS Feeds ---"
 VCTools::Podcast::Ingestor.new.run
 puts
 
-# Step 2: Transcribe new episodes
-puts "--- Step 2: Transcribe Episodes ---"
-VCTools::Podcast::TranscriptService.new.run(limit: target)
+# Steps 2-6: Transcribe -> Extract Insights -> Rank -> Cluster -> Analyze
+VCTools::Podcast::PipelineRunner.run_stage_chain(limit: target)
 puts
 
-# Step 3: Analyze transcribed episodes
-puts "--- Step 3: Analyze Episodes ---"
-VCTools::Podcast::AnalysisService.new.run(limit: target)
-puts
-
-# Step 3b: Backfill — if any episodes failed analysis, transcribe+analyze more
-#          until we have enough analyzed episodes for the digest
+# Backfill — if we don't yet have enough episodes fully through the pipeline,
+# pull one more new episode through all 5 stages at a time until we do
 db = VCTools::Podcast::Database.connect
 today_midnight = Time.new(Time.now.year, Time.now.month, Time.now.day, 0, 0, 0).utc
 max_backfill_attempts = 5
@@ -52,8 +45,7 @@ max_backfill_attempts.times do |attempt|
   break if remaining == 0
 
   puts "--- Backfill #{attempt + 1}: #{analyzed_today}/#{target} analyzed, picking another episode ---"
-  VCTools::Podcast::TranscriptService.new.run(limit: 1)
-  VCTools::Podcast::AnalysisService.new.run(limit: 1)
+  VCTools::Podcast::PipelineRunner.run_stage_chain(limit: 1)
   puts
 end
 

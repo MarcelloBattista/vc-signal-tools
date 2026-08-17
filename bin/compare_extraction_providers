@@ -1,0 +1,179 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Runs the Stage 1 (insight extraction) prompt through Gemini and DeepSeek on
+# the same real transcripts, so you can compare cost/quality/speed before
+# deciding whether to migrate off Gemini. Read-only against the DB — writes
+# nothing to episode_insights. Reports land in tmp/provider_comparison/.
+#
+# Usage:
+#   ruby bin/compare_extraction_providers
+#   EPISODES="The Zoom IPO (with Santi Subotovsky)|The Uber IPO" ruby bin/compare_extraction_providers
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "dotenv/load"
+require "json"
+require "fileutils"
+require "database"
+require "gemini_client"
+require "deepseek_client"
+require "insight_extraction_prompt"
+
+# $ per 1M tokens. DeepSeek off-peak rate (01:00-04:00, 06:00-10:00 UTC excluded);
+# swap to the peak figures in the comment if this runs during those windows.
+PRICING = {
+  "gemini-2.5-flash" => { input: 0.30, output: 2.50 },
+  "deepseek-v4-flash" => { input: 0.22, output: 0.66 }  # peak: 0.44 / 1.32
+}.freeze
+
+DEFAULT_EPISODES = [
+  "The Zoom IPO (with Santi Subotovsky)",
+  "The Uber IPO"
+].freeze
+
+def cost_for(model, usage)
+  return nil unless usage && PRICING[model]
+
+  rate = PRICING[model]
+  input_cost  = (usage[:prompt_tokens].to_f / 1_000_000) * rate[:input]
+  output_cost = (usage[:completion_tokens].to_f / 1_000_000) * rate[:output]
+  (input_cost + output_cost).round(4)
+end
+
+def transcript_text_for(db, episode)
+  transcript = db[:transcripts].where(episode_id: episode[:id]).first
+  return nil unless transcript
+
+  chunks = db[:transcript_chunks].where(transcript_id: transcript[:id]).order(:chunk_index).all
+  return nil if chunks.empty?
+
+  chunks.map { |c| c[:text] }.join("\n\n")
+end
+
+def run_provider(name, client, model_key, episode_title, transcript_text)
+  puts "  [#{name}] extracting..."
+  started = Time.now
+
+  prompt = VCTools::Podcast::InsightExtractionPrompt.build(
+    episode_title: episode_title, transcript_text: transcript_text
+  )
+  validate = ->(r) { r["insights"].is_a?(Array) && !r["insights"].empty? }
+
+  # DeepSeek's v4-flash emits hidden reasoning_content (like Gemini's thinking)
+  # that also counts against max_tokens — give it the same headroom as Gemini
+  # or a complex 60-observation extraction burns the whole budget on reasoning
+  # and never emits the final JSON content.
+  result = if name == "Gemini"
+             client.generate_json(prompt, max_output_tokens: 32_768, &validate)
+           else
+             client.generate_json(prompt, max_tokens: 32_768, &validate)
+           end
+
+  elapsed = (Time.now - started).round(1)
+  insights = result ? Array(result["insights"]) : []
+  usage = client.last_usage
+
+  {
+    name: name,
+    insights: insights,
+    count: insights.length,
+    usage: usage,
+    cost: cost_for(model_key, usage),
+    elapsed_seconds: elapsed,
+    failed: result.nil?
+  }
+end
+
+def render_report(episode_title, gemini_result, deepseek_result)
+  lines = []
+  lines << "# Extraction comparison — #{episode_title}"
+  lines << ""
+  lines << "| Provider | Observations | Prompt tokens | Completion tokens | Est. cost | Time |"
+  lines << "|---|---|---|---|---|---|"
+
+  [gemini_result, deepseek_result].each do |r|
+    if r[:failed]
+      lines << "| #{r[:name]} | FAILED | — | — | — | #{r[:elapsed_seconds]}s |"
+    else
+      u = r[:usage] || {}
+      cost = r[:cost] ? "$#{format('%.4f', r[:cost])}" : "?"
+      lines << "| #{r[:name]} | #{r[:count]} | #{u[:prompt_tokens] || '?'} | #{u[:completion_tokens] || '?'} | #{cost} | #{r[:elapsed_seconds]}s |"
+    end
+  end
+  lines << ""
+
+  [gemini_result, deepseek_result].each do |r|
+    lines << "## #{r[:name]}"
+    lines << ""
+    if r[:failed]
+      lines << "_extraction failed — no output to show_"
+    else
+      r[:insights].first(10).each do |obs|
+        lines << "- **[#{obs['type']}]** #{obs['claim']}"
+        lines << "  - evidence: #{obs['evidence']}"
+        lines << "  - scores: importance=#{obs['importance']} novelty=#{obs['novelty']} specificity=#{obs['specificity']} actionability=#{obs['actionability']} credibility=#{obs['credibility']}"
+      end
+      lines << ""
+      lines << "_(showing first 10 of #{r[:count]} observations — full JSON in the sibling .json file)_"
+    end
+    lines << ""
+  end
+
+  lines.join("\n")
+end
+
+# --- main ---
+
+db = VCTools::Podcast::Database.connect
+episode_titles = (ENV["EPISODES"]&.split("|") || DEFAULT_EPISODES).map(&:strip)
+
+gemini = VCTools::Podcast::GeminiClient.new(model: "gemini-2.5-flash", timeout: 240)
+deepseek = VCTools::Podcast::DeepSeekClient.new(model: "deepseek-v4-flash", timeout: 240)
+
+unless gemini.api_key?
+  puts "No GEMINI_API_KEY set — aborting"
+  exit 1
+end
+unless deepseek.api_key?
+  puts "No DEEPSEEK_API_KEY set — aborting"
+  exit 1
+end
+
+output_dir = File.join(__dir__, "..", "tmp", "provider_comparison")
+FileUtils.mkdir_p(output_dir)
+
+episode_titles.each do |title|
+  episode = db[:episodes].where(title: title).first
+  unless episode
+    puts "Episode not found: #{title} — skipping"
+    next
+  end
+
+  transcript_text = transcript_text_for(db, episode)
+  unless transcript_text
+    puts "No transcript for: #{title} — skipping (has it been transcribed?)"
+    next
+  end
+
+  puts "--- #{title} (#{(transcript_text.length / 4.0).ceil} est. tokens) ---"
+
+  gemini_result   = run_provider("Gemini", gemini, "gemini-2.5-flash", title, transcript_text)
+  deepseek_result = run_provider("DeepSeek", deepseek, "deepseek-v4-flash", title, transcript_text)
+
+  slug = title.downcase.gsub(/[^a-z0-9]+/, "_").gsub(/^_|_$/, "")
+  report_path = File.join(output_dir, "#{slug}.md")
+  json_path   = File.join(output_dir, "#{slug}.json")
+
+  File.write(report_path, render_report(title, gemini_result, deepseek_result))
+  File.write(json_path, JSON.pretty_generate(
+    episode: title,
+    gemini: gemini_result.merge(insights: gemini_result[:insights]),
+    deepseek: deepseek_result.merge(insights: deepseek_result[:insights])
+  ))
+
+  puts "  -> #{report_path}"
+  puts
+end
+
+puts "Done. Reports in #{output_dir}"

@@ -14,6 +14,11 @@ module VCTools
 
         FEEDS_PATH = File.expand_path("../config/podcast_feeds.yml", __dir__)
 
+        # Episodes older than this never enter the processing queue — a daily
+        # digest should reflect recent conversations, not multi-year-old backlog.
+        # Inserted as status "skipped" (dedup'd by guid) rather than "new".
+        MAX_EPISODE_AGE_DAYS = 30
+
         def initialize
             @db = VCTools::Podcast::Database.connect
             @podcasts = @db[:podcasts]
@@ -49,11 +54,23 @@ module VCTools
             count = 0
             rss.items.each do |item|
                 break if count >= max
+
+                # Podcast feeds are newest-first, so the first already-known guid
+                # means everything after it is already known or older — stop here
+                # rather than skipping past it and drilling into the back-catalog.
+                guid = episode_guid(item)
+                break if guid.nil?
+                break if @episodes.where(guid: guid).count > 0
+
                 count += 1 if upsert_episode(podcast[:id], item)
             end
 
             return count
 
+        end
+
+        def episode_guid(item)
+            item.guid&.content || item.link
         end
 
         def fetch_rss(url)
@@ -92,7 +109,7 @@ module VCTools
         end
         
         def upsert_episode(podcast_id, item)
-            guid = item.guid&.content || item.link
+            guid = episode_guid(item)
             return false if guid.nil?
 
             return false if @episodes.where(guid: guid).count > 0
@@ -101,6 +118,10 @@ module VCTools
             pub_time = item.pubDate ? Time.parse(item.pubDate.to_s).utc : now
             audio_url = item.enclosure&.url
 
+            # Record it either way (so it's dedup'd by guid and never re-discovered),
+            # but only genuinely recent episodes are eligible for processing.
+            status = pub_time < (now - MAX_EPISODE_AGE_DAYS * 86_400) ? "skipped" : "new"
+
             @episodes.insert(
                 podcast_id:   podcast_id,
                 guid:         guid,
@@ -108,7 +129,7 @@ module VCTools
                 published_at: pub_time,
                 audio_url:    audio_url,
                 duration_sec: nil,
-                status:       "new",
+                status:       status,
                 created_at:   now,
                 updated_at:   now
             )

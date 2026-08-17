@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# One-time cleanup: the ingestor used to drill backward into each feed's
+# back-catalog on every run instead of stopping at the first already-known
+# episode (fixed in lib/podcast_ingestor.rb). This left hundreds of stale
+# episodes sitting in the "new" queue, competing with genuinely recent ones.
+# Marks anything in "new" older than the cutoff as "skipped" so it's excluded
+# from processing without deleting the row (guid dedup still works).
+#
+# Usage:
+#   ruby bin/skip_stale_backlog            # 30-day cutoff (default)
+#   MAX_AGE_DAYS=14 ruby bin/skip_stale_backlog
+
+$LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
+
+require "database"
+
+db = VCTools::Podcast::Database.connect
+max_age_days = (ENV["MAX_AGE_DAYS"] || 30).to_i
+cutoff = Time.now.utc - (max_age_days * 86_400)
+
+stale = db[:episodes].where(status: "new").where { published_at < cutoff }
+count = stale.count
+
+puts "Marking #{count} episodes older than #{cutoff.strftime('%Y-%m-%d')} (#{max_age_days} days) as skipped..."
+stale.update(status: "skipped", updated_at: Time.now.utc)
+
+remaining = db[:episodes].where(status: "new").count
+puts "Done. #{remaining} episodes remain in the 'new' queue (all within #{max_age_days} days)."

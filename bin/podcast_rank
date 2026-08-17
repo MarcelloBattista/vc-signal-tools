@@ -4,6 +4,6 @@
 $LOAD_PATH.unshift(File.join(__dir__, "..", "lib"))
 
 require "dotenv/load"
-require "transcript_service"
+require "ranking_service"
 
-VCTools::Podcast::TranscriptService.new.run(limit: ENV["LIMIT"]&.to_i)
+VCTools::Podcast::RankingService.new.run(limit: ENV["LIMIT"]&.to_i)
